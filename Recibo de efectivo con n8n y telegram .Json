@@ -1,0 +1,261 @@
+{
+  "name": "PDF CON AGENTE",
+  "nodes": [
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ==============================================\n// FUNCIONES DE EXTRACCIÓN Y FORMATEO DE DATOS\n// ==============================================\n\n/**\n * Extrae el monto del texto con soporte para múltiples formatos\n * @param {string} text - Texto que contiene el monto\n * @returns {string} Monto limpio con 2 decimales\n */\nfunction extractAmount(text) {\n  if (!text) return '0.00';\n  \n  // Manejar formatos: 1000, 1,000, 1000.50, 1,000.50, 500.5\n  const amountMatch = text.match(/(\\d{1,3}(?:,\\d{3})*(?:\\.\\d{2})?|\\d+\\.\\d{1,2}|\\d+)\\s*(?:quetzales|gtq|q|usd|dólares)?/i);\n  \n  if (!amountMatch || !amountMatch[1]) return '0.00';\n  \n  // Limpiar el mato (remover comas)\n  let amount = amountMatch[1].replace(/,/g, '');\n  \n  // Asegurar formato decimal\n  if (!amount.includes('.')) {\n    amount += '.00';\n  } else {\n    const [whole, decimal] = amount.split('.');\n    if (decimal.length === 1) amount += '0';\n    if (decimal.length > 2) amount = `${whole}.${decimal.substring(0, 2)}`;\n  }\n  \n  return amount;\n}\n\n/**\n * Formatea el monto según convenciones de Guatemala\n * @param {string} amount - Monto numérico\n * @returns {string} Monto formateado\n */\nfunction formatAmount(amount) {\n  const num = parseFloat(amount || '0');\n  \n  if (isNaN(num)) {\n    console.error('Monto inválido:', amount);\n    return '0.00';\n  }\n  \n  return num.toLocaleString('es-GT', {\n    minimumFractionDigits: 2,\n    maximumFractionDigits: 2\n  });\n}\n\n/**\n * Extrae datos estructurados del mensaje de texto\n * @param {string} text - Mensaje de Telegram\n * @returns {object} Datos extraídos\n */\nfunction extractReceiptData(text) {\n  if (!text) return {};\n  \n  // Expresiones regulares mejoradas\n  const clientMatch = text.match(/(?:cliente|clienta|para el)\\s*(?:no\\.?|numero|#)?\\s*(\\d+)\\s+([a-zA-ZáéíóúÁÉÍÓÚñÑ\\s]+)/i);\n  const methodMatch = text.match(/(?:con|mediante|por)\\s+(efectivo|transferencia|cheque|depósito|tarjeta|sinpe|spei)\\b/i);\n  const invoiceMatch = text.match(/(?:factura|ref|referencia)\\s*(?:no\\.?|numero|#)?\\s*([a-zA-Z0-9\\-]+)/i);\n  \n  // Extraer monto con la función dedicada\n  const amount = extractAmount(text);\n\n  return {\n    clientId: clientMatch?.[1]?.trim() || '',\n    clientName: clientMatch?.[2]?.trim() || '',\n    amount: amount,\n    paymentMethod: methodMatch?.[1]?.toLowerCase() || 'efectivo',\n    invoiceNumber: invoiceMatch?.[1]?.trim() || '',\n    paymentType: text.toLowerCase().includes('total') ? 'complete' : 'partial'\n  };\n}\n\n// ==============================================\n// FUNCIONES DE UTILERÍA\n// ==============================================\n\n/**\n * Obtiene el mensaje de texto de Telegram\n * @param {object} input - Objeto de entrada\n * @returns {string} Texto del mensaje\n */\nfunction getTelegramMessage(input) {\n  try {\n    return input?.item?.json?.message?.text || '';\n  } catch (e) {\n    console.error('Error al obtener mensaje:', e);\n    return '';\n  }\n}\n\n/**\n * Genera número de recibo con timestamp\n * @returns {string} Número de recibo único\n */\nfunction generateReceiptNumber() {\n  const now = new Date();\n  return `REC-${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;\n}\n\n/**\n * Formatea la fecha actual (DD/MM/YYYY)\n * @returns {string} Fecha formateada\n */\nfunction getCurrentDate() {\n  const now = new Date();\n  return [\n    String(now.getDate()).padStart(2, '0'),\n    String(now.getMonth() + 1).padStart(2, '0'),\n    now.getFullYear()\n  ].join('/');\n}\n\n// ==============================================\n// PROCESAMIENTO PRINCIPAL\n// ==============================================\n\n/**\n * Procesa los datos y genera el recibo completo\n * @param {object} input - Datos de entrada\n * @returns {object} Recibo estructurado\n */\nfunction processTelegramReceipt(input) {\n  // 1. Obtener y procesar mensaje\n  const telegramMessage = getTelegramMessage(input);\n  const extracted = extractReceiptData(telegramMessage);\n  \n  // 2. Obtener datos adicionales del AI\n  let aiData = {};\n  try {\n    aiData = input?.item?.json?.ai_processed_data ? \n            JSON.parse(input.item.json.ai_processed_data) : {};\n  } catch (e) {\n    console.error('Error al procesar datos de AI:', e);\n  }\n\n  // 3. Obtener información del solicitante\n  const requester = {\n    name: `${input?.item?.json?.message?.from?.first_name || ''} ${input?.item?.json?.message?.from?.last_name || ''}`.trim(),\n    username: input?.item?.json?.message?.from?.username || '',\n    telegramId: input?.item?.json?.message?.from?.id || ''\n  };\n\n  // 4. Preparar valores finales\n  const amountValue = parseFloat(extracted.amount || aiData.amount || '0');\n  const formattedAmount = amountValue.toFixed(2);\n\n  // 5. Construir objeto final\n  return {\n    // Información del recibo\n    receipt_number: generateReceiptNumber(),\n    invoice_number: extracted.invoiceNumber || aiData.invoice_number || `FAC-${new Date().getFullYear()}${String(new Date().getMonth() + 1).padStart(2, '0')}${String(new Date().getDate()).padStart(2, '0')}-001`,\n    date: getCurrentDate(),\n    \n    // Información del cliente\n    client_name: extracted.clientName || aiData.client_name || 'Cliente',\n    client_id: extracted.clientId || aiData.client_id || '',\n    \n    // Detalles del pago\n    concept: extracted.invoiceNumber ? `Pago de factura ${extracted.invoiceNumber}` : 'Pago de servicios',\n    payment_method: extracted.paymentMethod || aiData.payment_method || 'efectivo',\n    payment_details: '',\n    payment_type: extracted.paymentType || aiData.payment_type || 'partial',\n    \n    // Montos\n    amount: amountValue.toFixed(2),\n    formatted_amount: `Q${formattedAmount} GTQ`,\n    currency: 'GTQ',\n    \n    // Metadatos\n    requested_by: requester,\n    generated_at: new Date().toISOString(),\n    \n    // Datos crudos para depuración (opcional)\n    _raw: {\n      telegramMessage,\n      extracted,\n      aiData\n    }\n  };\n}\n\n// ==============================================\n// EJECUCIÓN PRINCIPAL\n// ==============================================\n\ntry {\n  // Procesar los datos de Telegram\n  const result = processTelegramReceipt($('Telegram Trigger') || {});\n  \n  // Depuración (opcional)\n  console.log(\"Resultado final del procesamiento:\", JSON.stringify(result, null, 2));\n  \n  // Retornar el resultado estructurado\n  return result;\n  \n} catch (error) {\n  console.error('Error crítico al procesar recibo:', error);\n  \n  return {\n    error: \"Error al procesar el recibo\",\n    details: error.message,\n    input: $('Telegram Trigger'),\n    stack: error.stack\n  };\n}\n\n// ==============================================\n// PRUEBAS UNITARIAS (OPCIONAL)\n// ==============================================\n\nfunction runTests() {\n  console.log(\"=== INICIANDO PRUEBAS ===\");\n  \n  // Pruebas de extracción de monto\n  const amountTests = [\n    {input: \"1000 quetzales\", expected: \"1000.00\"},\n    {input: \"1,000.50\", expected: \"1000.50\"},\n    {input: \"500.5\", expected: \"500.50\"},\n    {input: \"abc\", expected: \"0.00\"},\n    {input: \"12345.678\", expected: \"12345.67\"}\n  ];\n\n  amountTests.forEach(test => {\n    const result = extractAmount(test.input);\n    console.log(`[${result === test.expected ? '✓' : '✗'}] ${test.input} => ${result}`);\n  });\n\n  // Pruebas de extracción completa\n  const fullText = \"Hola, necesito un recibo para el cliente no. 1001011 César Ucelo que me abona 10,000.50 con un cheque y la factura de referencia es la 47040016489\";\n  console.log(\"\\nPrueba de extracción completa:\");\n  console.log(extractReceiptData(fullText));\n}\n\n// Descomentar para ejecutar pruebas durante el desarrollo\n// runTests();"
+      },
+      "name": "Preprocess Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        740,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "html": "<!DOCTYPE html>\n<html lang=\"es\">\n<head>\n    <meta charset=\"UTF-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n    <title>Recibo de Dinero</title>\n    <style>\n        body {\n            font-family: 'Arial', sans-serif;\n            margin: 0;\n            padding: 20px;\n            color: #333;\n        }\n        .receipt-container {\n            max-width: 600px;\n            margin: 0 auto;\n            border: 2px solid #E31937; /* Color Mobil */\n            border-radius: 10px;\n            padding: 25px;\n            box-shadow: 0 0 15px rgba(0,0,0,0.1);\n        }\n        .header {\n            text-align: center;\n            margin-bottom: 20px;\n        }\n        .logo {\n            max-width: 250px;\n            margin-bottom: 40px;\n        }\n        .title {\n            color: #E31937;\n            font-size: 24px;\n            font-weight: bold;\n            margin: 10px 0;\n            text-transform: uppercase;\n        }\n        .receipt-details {\n            margin: 25px 0;\n        }\n        .detail-row {\n            display: flex;\n            margin-bottom: 10px;\n            border-bottom: 1px dashed #ddd;\n            padding-bottom: 8px;\n        }\n        .detail-label {\n            font-weight: bold;\n            width: 40%;\n            color: #555;\n        }\n        .detail-value {\n            width: 60%;\n        }\n        .payment-section {\n            background-color: #f8f8f8;\n            padding: 15px;\n            border-radius: 8px;\n            margin: 15px 0;\n            border-left: 4px solid #E31937;\n        }\n        .payment-method {\n            font-weight: bold;\n            color: #E31937;\n        }\n        .payment-type {\n            display: inline-block;\n            margin-top: 10px;\n            padding: 5px 10px;\n            background-color: #E31937;\n            color: white;\n            border-radius: 4px;\n            font-size: 14px;\n        }\n        .amount {\n            font-size: 22px;\n            text-align: right;\n            margin: 20px 0;\n            padding: 15px;\n            background-color: #f0f0f0;\n            border-radius: 5px;\n        }\n        .footer {\n            text-align: center;\n            margin-top: 30px;\n            font-size: 14px;\n            color: #777;\n        }\n        .signature-line {\n            border-top: 1px solid #333;\n            width: 60%;\n            margin: 40px auto 10px;\n            text-align: center;\n            padding-top: 5px;\n        }\n    </style>\n</head>\n<body>\n    <div class=\"receipt-container\">\n        <div class=\"header\">\n            <!-- Logo Mobil -->\n            <img class=\"logo\" src=\"https://lubtrac.com.gt/wp-content/uploads/2023/02/lubtrac_logo.jpg\" alt=\"Logo Mobil\">\n            <div class=\"title\">Recibo de Dinero</div>\n        </div>\n\n        <div class=\"receipt-details\">\n            <div class=\"detail-row\">\n                <div class=\"detail-label\">No. Recibo:</div>\n                <div class=\"detail-value\">{{ $node[\"Preprocess Data\"].json[\"receipt_number\"] || \"N/A\" }}</div>\n            </div>\n            <div class=\"detail-row\">\n                <div class=\"detail-label\">Factura Relacionada:</div>\n                <div class=\"detail-value\">{{ $node[\"Preprocess Data\"].json[\"invoice_number\"] || \"N/A\" }}</div>\n            </div>\n            <div class=\"detail-row\">\n                <div class=\"detail-label\">Fecha:</div>\n                <div class=\"detail-value\">{{ $node[\"Preprocess Data\"].json[\"date\"]|| \"Fecha no disponible\" }}</div>\n            </div>\n            <div class=\"detail-row\">\n                <div class=\"detail-label\">Recibí de:</div>\n                <div class=\"detail-value\">{{ $node[\"Preprocess Data\"].json[\"client_name\"]|| \"Cliente no definido\" }}</div>\n            </div>\n            <div class=\"detail-row\">\n                <div class=\"detail-label\">Concepto:</div>\n                <div class=\"detail-value\">{{ $node[\"Preprocess Data\"].json[\"concept\"] }}</div>\n            </div>\n            \n            <!-- Sección de Pago -->\n            <div class=\"payment-section\">\n                <div><strong>Método de Pago:</strong> \n                    <span class=\"payment-method\">{{ $node[\"Preprocess Data\"].json[\"payment_method\"] }}</span>\n                    {{ $node[\"Preprocess Data\"].json[\"payment_details\"] ? ' - ' + $node[\"Preprocess Data\"].json[\"payment_details\"] : '' }}\n                </div>\n                <div class=\"payment-type\">\n                    {{ $node[\"Preprocess Data\"].json[\"payment_type\"] === \"complete\" ? \"CANCELACIÓN TOTAL\" : \"ABONO\" }}\n                </div>\n            </div>\n        </div>\n\n        <div class=\"amount\">\n            <strong>Total:</strong> {{$json[\"formatted_amount\"] || \"Q0.00 GTQ\"}}\n        </div>\n\n        <div class=\"signature-line\">Firma y Sello</div>\n\n        <div class=\"footer\">\n            <p>Mobil | Lubtrac © {{ \"now\"|date(\"Y\") }} - Documento válido como comprobante fiscal</p>\n        </div>\n    </div>\n</body>\n</html>"
+      },
+      "name": "HTML Template",
+      "type": "n8n-nodes-base.html",
+      "typeVersion": 1.2,
+      "position": [
+        940,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.message.text }}",
+        "options": {
+          "systemMessage": "=# Prompt para Asistente de Recibos\n\nEres un asistente virtual especializado en recopilar información para generar recibos de dinero. Tu objetivo es obtener todos los datos necesarios para completar un recibo de manera ordenada y estructurada, pero con un toque de humor.\n\n## Personalidad\n\n- Eres amable pero ligeramente sarcástico solo con el primer mensaje\n- Aprecias cuando los usuarios usan \"por favor\" y \"gracias\"\n- Mantienes un tono conversacional y relajado y con una conversacion corta\n- Te encanta el tema de finanzas y pagos.\n\n## Datos a recopilar\n\nDebes recopilar los siguientes datos para el recibo: para pasarlos al nodo que recopila los datos y los agrega en el html:\n\n1. **receipt_number**: Número del recibo\n2. **invoice_number**: Número de factura relacionada (opcional)\n3. **date**: Fecha del recibo (formato DD/MM/YYYY)\n4. **client_name**: Nombre completo del cliente\n5. **concept**: Concepto o razón del pago\n6. **payment_method**: Método de pago (Efectivo, Transferencia, Cheque, etc.)\n7. **payment_details**: Detalles adicionales del pago (número de cuenta, número de cheque, etc.)\n8. **payment_type**: Tipo de pago (\"complete\" para pago total, \"partial\" para abono)\n9. **amount**: Monto del pago (formato numérico, sin símbolo de moneda)\n\n## Flujo de conversación\n\n1. **Saludo inicial**: Preséntate con humor y conun mensaje corto y explica que vas a ayudar a crear un recibo.\n   \n2. **Recopilación de datos**: Pregunta por cada dato faltante, si no te da toda la informacion desde el primer mensaje.\n   \n   - Si el usuario no usa \"por favor\", haz una broma leve y corta como:\n     * \"¡Vaya! ¿Y la de por favor no te la sabes?\"\n\n   \n   - Si el usuario es cortés, agradécelo con comentarios como:\n     * \"Gracias por ser tan amable. Hacen falta más personas como tú en el departamento de contabilidad.\"\n\n3. **Confirmación**: Al final, presenta todos los datos recopilados en formato estructurado y pregunta si la información es correcta.\n\n4. **Formato de salida**: Cuando todos los datos estén confirmados, formatea la información en un objeto JSON limpio que pueda ser utilizado directamente por el siguiente nodo:\n\n```json\n{\n  \"receipt_number\": \"REC-001\",\n  \"invoice_number\": \"INV-123\",\n  \"date\": \"03/04/2025\",\n  \"client_name\": \"Juan Pérez\",\n  \"concept\": \"Pago por servicios de consultoría\",\n  \"payment_method\": \"Transferencia\",\n  \"payment_details\": \"Cuenta #12345\",\n  \"payment_type\": \"complete\",\n  \"amount\": \"1500.00\"\n}"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.8,
+      "position": [
+        420,
+        280
+      ],
+      "name": "AI Agent",
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "sendDocument",
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "binaryData": true,
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1860,
+        300
+      ],
+      "name": "Telegram"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "HTML",
+              "value": "={{ $json.html.base64Encode() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1140,
+        300
+      ],
+      "name": "Edit Fields"
+    },
+    {
+      "parameters": {
+        "operation": "toBinary",
+        "sourceProperty": "HTML",
+        "options": {
+          "fileName": "index.html",
+          "mimeType": "text/html"
+        }
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        1380,
+        300
+      ],
+      "name": "Convert to File"
+    },
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        220,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://687d-45-229-43-148.ngrok-free.app/forms/chromium/convert/html",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "files",
+              "inputDataFieldName": "data"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "recibo.pdf"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1600,
+        300
+      ],
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-1.5-pro",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        380,
+        520
+      ],
+      "name": "Google Gemini Chat Model"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Preprocess Data": {
+      "main": [
+        [
+          {
+            "node": "HTML Template",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTML Template": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Preprocess Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Fields": {
+      "main": [
+        [
+          {
+            "node": "Convert to File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to File": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram": {
+      "main": [
+        []
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
